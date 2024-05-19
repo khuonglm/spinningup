@@ -1,2 +1,2 @@
-python -m spinup.run test_policy /Users/khuongle/Documents/4th-semester/cs492/spinningup/data/trpo_lunarlander_trial/trpo_lunarlander_trial_s0
-python -m spinup.run test_policy /Users/khuongle/Documents/4th-semester/cs492/spinningup/data/dqn_lunarlander_trial/dqn_lunarlander_trial_s0
+pip install -e .
+pip install pyglet==1.5.27

@@ -1,14 +1,16 @@
 import time
 
-import gym
 import numpy as np
 import scipy.signal
 import torch
 import torch.nn.functional as F
+# import gymnasium as gym
+# from gymnasium.spaces import Box
+import gym
 from gym.spaces import Box
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
-import spinup.algos.pytorch.trpo.core as core
+import spinup.algos.pytorch.trpo_cnn.core as core
 from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_tools import (
     mpi_avg,
@@ -260,6 +262,8 @@ def trpo(
         algo: Either 'trpo' or 'npg': this code supports both, since they are
             almost the same.
 
+        image_obs (boolean): whether the observation is image or not 
+
     """
 
     setup_pytorch_for_mpi()
@@ -274,12 +278,21 @@ def trpo(
     env = env_fn()
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape
+    image_obs = False
 
     # Share information about action space with policy architecture
     ac_kwargs["action_space"] = env.action_space
+    in_features = obs_dim[0]
+
+    # detect image observation
+    if isinstance(env.observation_space, Box) and len(obs_dim) == 3:
+        actor_critic = core.CNNActorCritic
+        image_obs = True
+        in_features = 512
+        ac_kwargs["observation_space"] = env.observation_space
 
     # Main model
-    actor_critic = actor_critic(in_features=obs_dim[0], **ac_kwargs)
+    actor_critic = actor_critic(in_features=in_features, **ac_kwargs)
 
     # Experience buffer
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
@@ -392,7 +405,7 @@ def trpo(
             # Value function gradient step
             train_vf.zero_grad()
             v_loss.backward()
-            mpi_avg_grads(train_vf.param_groups)
+            mpi_avg_grads(actor_critic.value_function)
             train_vf.step()
 
         v = actor_critic.value_function(obs)
@@ -408,24 +421,25 @@ def trpo(
         )
 
     start_time = time.time()
-    o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+    o, _ = env.reset()
+    r, d, ep_ret, ep_len = 0, False, 0, 0
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
         actor_critic.eval()
         for t in range(local_steps_per_epoch):
-            a, _, logp_t, info_t, _, v_t = actor_critic(torch.Tensor(o.reshape(1, -1)))
+            a, _, logp_t, info_t, _, v_t = actor_critic(torch.Tensor(o))
 
             # save and log
             buf.store(
                 o,
                 a.detach().numpy(),
                 r,
-                v_t.item(),
+                v_t,
                 logp_t.detach().numpy(),
                 core.values_as_sorted_list(info_t),
             )
-            logger.store(VVals=v_t.item())
+            logger.store(VVals=v_t)
 
             o, r, d, _ = env.step(a.detach().numpy()[0])
             ep_ret += r
@@ -440,14 +454,15 @@ def trpo(
                     r
                     if d
                     else actor_critic.value_function(
-                        torch.Tensor(o.reshape(1, -1))
-                    ).item()
+                        torch.Tensor(o)
+                    )
                 )
                 buf.finish_path(last_val)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+                o, _ = env.reset()
+                r, d, ep_ret, ep_len = 0, False, 0, 0
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs - 1):
@@ -494,7 +509,7 @@ if __name__ == "__main__":
     from spinup.utils.run_utils import setup_logger_kwargs
 
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
-
+    
     trpo(
         lambda: gym.make(args.env),
         actor_critic=core.ActorCritic,

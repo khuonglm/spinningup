@@ -1,6 +1,7 @@
 import time
 
-import gymnasium as gym
+# import gymnasium as gym
+import gym
 import numpy as np
 import torch
 import torch.nn.functional as F

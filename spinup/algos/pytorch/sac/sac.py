@@ -3,7 +3,8 @@ import itertools
 import numpy as np
 import torch
 from torch.optim import Adam
-import gymnasium as gym
+# import gymnasium as gym
+import gym
 import time
 import spinup.algos.pytorch.sac.core as core
 from spinup.utils.logx import EpochLogger

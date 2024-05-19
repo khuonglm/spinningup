@@ -14,6 +14,12 @@ def convert_to_json(in_fname, out_fname=None):
     
     return out_fname
 
+def analysis(in_fname):
+    df = pd.read_table(in_fname)
+    print("mean:", df.mean())
+    print("max:", df.max())
+    print("min:", df.min())
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -22,3 +28,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     convert_to_json(args.infname, args.outfname)
+    # analysis(args.infname)

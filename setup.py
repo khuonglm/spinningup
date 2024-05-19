@@ -15,7 +15,8 @@ setup(
     version=__version__,#'0.1',
     install_requires=[
         'cloudpickle==1.2.1',
-        'gymnasium[atari,box2d,classic_control,accept-rom-license]',
+        'gym[atari,box2d,classic_control]~=0.15.3',
+        # 'gymnasium[atari,box2d,classic_control,accept-rom-license]',
         'ipython',
         'joblib',
         'matplotlib',
@@ -28,7 +29,7 @@ setup(
         'seaborn',
         'tensorflow',
         'torch',
-        'tqdm'
+        'tqdm',
     ],
     description="Teaching tools for introducing people to deep RL.",
     author="Joshua Achiam",
