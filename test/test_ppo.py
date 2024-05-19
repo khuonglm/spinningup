@@ -3,7 +3,7 @@
 import unittest
 from functools import partial
 
-import gym
+import gymnasium as gym
 import tensorflow as tf
 
 from spinup import ppo_tf1 as ppo

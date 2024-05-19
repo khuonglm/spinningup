@@ -106,7 +106,8 @@ class Logger:
             print(colorize("Logging data to %s"%self.output_file.name, 'green', bold=True))
         else:
             self.output_dir = None
-            self.output_file = None
+            # get json file of testing result
+            self.output_file = output_fname
         self.first_row=True
         self.log_headers = []
         self.log_current_row = {}
