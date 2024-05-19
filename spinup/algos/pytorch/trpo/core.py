@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from gym.spaces import Box, Discrete
+from gymnasium.spaces import Box, Discrete
+# from gym.spaces import Box, Discrete
 from torch.distributions.categorical import Categorical
 from torch.distributions.kl import kl_divergence
 from torch.distributions.normal import Normal

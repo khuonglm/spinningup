@@ -1,7 +1,7 @@
 import time
 
-# import gymnasium as gym
-import gym
+import gymnasium as gym
+# import gym
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -123,16 +123,17 @@ def dqn(
 
     def test_agent(n=10):
         for _ in range(n):
-            o, r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
+            (o, _), r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
             while not (d or (ep_len == max_ep_len)):
                 # epsilon_eval used when evaluating the agent
-                o, r, d, _ = test_env.step(get_action(o, epsilon_eval))
+                o, r, d, t, _ = test_env.step(get_action(o, epsilon_eval))
+                d = d | t # truncated -> done
                 ep_ret += r
                 ep_len += 1
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
 
     start_time = time.time()
-    o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+    (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
     total_steps = steps_per_epoch * epochs
 
     # Main loop: collect experience in env and update/log each epoch
@@ -146,7 +147,8 @@ def dqn(
         a = get_action(o, epsilon)
 
         # Step the env
-        o2, r, d, _ = env.step(a)
+        o2, r, d, t, _ = env.step(a)
+        d = d | t # truncated -> done
         ep_ret += r
         ep_len += 1
 
@@ -164,7 +166,7 @@ def dqn(
 
         if d or (ep_len == max_ep_len):
             logger.store(EpRet=ep_ret, EpLen=ep_len)
-            o, r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+            (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
         # train at the rate of update_period if enough training steps have been run
         if replay_buffer.size > min_replay_history and t % update_period == 0:

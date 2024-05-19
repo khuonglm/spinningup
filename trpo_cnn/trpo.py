@@ -4,10 +4,10 @@ import numpy as np
 import scipy.signal
 import torch
 import torch.nn.functional as F
-# import gymnasium as gym
-# from gymnasium.spaces import Box
-import gym
-from gym.spaces import Box
+import gymnasium as gym
+from gymnasium.spaces import Box
+# import gym
+# from gym.spaces import Box
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 import spinup.algos.pytorch.trpo_cnn.core as core
@@ -421,8 +421,7 @@ def trpo(
         )
 
     start_time = time.time()
-    o, _ = env.reset()
-    r, d, ep_ret, ep_len = 0, False, 0, 0
+    (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
@@ -441,7 +440,8 @@ def trpo(
             )
             logger.store(VVals=v_t)
 
-            o, r, d, _ = env.step(a.detach().numpy()[0])
+            o, r, d, t, _ = env.step(a.detach().numpy()[0])
+            d = d | t # truncated -> done
             ep_ret += r
             ep_len += 1
 
@@ -461,8 +461,7 @@ def trpo(
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                o, _ = env.reset()
-                r, d, ep_ret, ep_len = 0, False, 0, 0
+                (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs - 1):

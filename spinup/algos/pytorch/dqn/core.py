@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-# from gymnasium.spaces import Box, Discrete
-from gym.spaces import Box, Discrete
+from gymnasium.spaces import Box, Discrete
+# from gym.spaces import Box, Discrete
 
 
 def count_vars(module):

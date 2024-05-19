@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.signal
-# from gymnasium.spaces import Box, Discrete
-from gym.spaces import Box, Discrete
+from gymnasium.spaces import Box, Discrete
+# from gym.spaces import Box, Discrete
 
 import torch
 import torch.nn as nn
