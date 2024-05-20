@@ -394,7 +394,7 @@ def trpo(
             # Value function gradient step
             train_vf.zero_grad()
             v_loss.backward()
-            mpi_avg_grads(train_vf.param_groups)
+            mpi_avg_grads(actor_critic.value_function)
             train_vf.step()
 
         v = actor_critic.value_function(obs)
