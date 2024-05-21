@@ -429,8 +429,8 @@ def trpo(
             )
             logger.store(VVals=v_t.item())
 
-            o, r, d, t, _ = env.step(a.detach().numpy()[0])
-            d = d | t # truncated -> done
+            o, r, d, truncated, _ = env.step(a.detach().numpy()[0])
+            d = d | truncated # truncated -> done
             ep_ret += r
             ep_len += 1
 

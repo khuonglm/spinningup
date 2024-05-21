@@ -126,8 +126,8 @@ def dqn(
             (o, _), r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
             while not (d or (ep_len == max_ep_len)):
                 # epsilon_eval used when evaluating the agent
-                o, r, d, t, _ = test_env.step(get_action(o, epsilon_eval))
-                d = d | t # truncated -> done
+                o, r, d, truncated, _ = test_env.step(get_action(o, epsilon_eval))
+                d = d | truncated # truncated -> done
                 ep_ret += r
                 ep_len += 1
             logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
@@ -147,8 +147,8 @@ def dqn(
         a = get_action(o, epsilon)
 
         # Step the env
-        o2, r, d, t, _ = env.step(a)
-        d = d | t # truncated -> done
+        o2, r, d, truncated, _ = env.step(a)
+        d = d | truncated # truncated -> done
         ep_ret += r
         ep_len += 1
 

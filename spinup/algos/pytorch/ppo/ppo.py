@@ -228,6 +228,9 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     def compute_loss_pi(data):
         obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
 
+        # if len(adv) > 1:
+        #     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
         # Policy loss
         pi, logp = ac.pi(obs, act)
         ratio = torch.exp(logp - logp_old)
@@ -295,13 +298,18 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     start_time = time.time()
     (o, _), ep_ret, ep_len = env.reset(), 0, 0
 
+    # for saving the best performance model
+    max_avg_ret = float(-1e9)
+    avg_ret = 0
+    count = 0
+
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
         for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
-            next_o, r, d, t, _ = env.step(a)
-            d = d | t # truncated -> done
+            next_o, r, d, truncated, _ = env.step(a)
+            d = d | truncated # truncated -> done
             ep_ret += r
             ep_len += 1
 
@@ -328,12 +336,19 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
+                    avg_ret += ep_ret
+                    count += 1
                 (o, _), ep_ret, ep_len = env.reset(), 0, 0
 
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
-            logger.save_state({'env': env}, None)
+            avg_ret = float(avg_ret / count)
+            if avg_ret > max_avg_ret:
+                logger.save_state({'env': env}, None)
+                max_avg_ret = avg_ret
+            
+            avg_ret, count = 0, 0
 
         # Perform PPO update!
         update()
