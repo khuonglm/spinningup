@@ -888,7 +888,7 @@ def trpo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
             if max_avg_ret < avg_ret:
                 print(avg_ret, max_avg_ret)
                 max_avg_ret = avg_ret
-                logger.save_state({'env': env}, None)
+                logger.save_state({'env': env}, epoch)
 
         # Perform TRPO update!
         update()

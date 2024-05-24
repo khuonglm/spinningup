@@ -19,16 +19,14 @@ def mlp(sizes, activation, output_activation=nn.Identity):
     return nn.Sequential(*layers)
 
 
+def count_vars(module):
+    return sum([np.prod(p.shape) for p in module.parameters()])
+
+
 class Actor(nn.Module):
     """Actor (Policy) Model."""
 
-    def __init__(self, state_size, action_size, hidden_sizes):
-        """Initialize parameters and build model.
-        Params
-        ======
-            state_size (int): Dimension of each state
-            action_size (int): Dimension of each action
-        """
+    def __init__(self, state_size, action_size, hidden_sizes=[64, 64]):
         super(Actor, self).__init__()
         
         self.pi = mlp(
@@ -40,18 +38,7 @@ class Actor(nn.Module):
     def forward(self, state):
         x = self.pi(state)
         action_probs = self.softmax(x)
-        return action_probs
-    
-    def evaluate(self, state, epsilon=1e-6):
-        action_probs = self.forward(state)
-
-        dist = Categorical(action_probs)
-        action = dist.sample().to(state.device)
-        # Have to deal with situation of 0.0 probabilities because we can't do log 0
-        z = action_probs == 0.0
-        z = z.float() * 1e-8
-        log_action_probabilities = torch.log(action_probs + z)
-        return action.detach().cpu(), action_probs, log_action_probabilities        
+        return action_probs      
     
     def get_action(self, state):
         """
@@ -61,12 +48,12 @@ class Actor(nn.Module):
         action_probs = self.forward(state)
 
         dist = Categorical(action_probs)
-        action = dist.sample().to(state.device)
+        action = dist.sample()
         # Have to deal with situation of 0.0 probabilities because we can't do log 0
         z = action_probs == 0.0
         z = z.float() * 1e-8
         log_action_probabilities = torch.log(action_probs + z)
-        return action.detach().cpu(), action_probs, log_action_probabilities
+        return action.detach(), action_probs, log_action_probabilities
     
     def get_det_action(self, state):
         action_probs = self.forward(state)
@@ -81,21 +68,13 @@ class Actor(nn.Module):
 class Critic(nn.Module):
     """Critic (Value) Model."""
 
-    def __init__(self, state_size, action_size, hidden_sizes):
-        """Initialize parameters and build model.
-        Params
-        ======
-            state_size (int): Dimension of each state
-            action_size (int): Dimension of each action
-            seed (int): Random seed
-            hidden_size (int): Number of nodes in the network layers
-        """
+    def __init__(self, state_size, action_size, hidden_sizes=[64, 64], seed=0):
         super(Critic, self).__init__()
+        torch.manual_seed(seed)
         self.q_function = mlp(
             [state_size] + hidden_sizes + [action_size],
             nn.ReLU
         )
 
     def forward(self, state):
-        """Build a critic (value) network that maps (state, action) pairs -> Q-values."""
         return self.q_function(state)
