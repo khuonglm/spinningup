@@ -73,6 +73,9 @@ class Actor(nn.Module):
         dist = Categorical(action_probs)
         action = dist.sample().to(state.device)
         return action.detach().cpu()
+    
+    def act(self, state):
+        return self.get_det_action(state)
 
 
 class Critic(nn.Module):

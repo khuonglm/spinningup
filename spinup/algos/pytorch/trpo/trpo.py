@@ -1,29 +1,540 @@
+# import time
+
+# import numpy as np
+# import scipy.signal
+# import torch
+# import torch.nn.functional as F
+# import gymnasium
+# from gymnasium.spaces import Box
+# # import gym
+# # from gym.spaces import Box
+# from torch.nn.utils import parameters_to_vector, vector_to_parameters
+
+# import spinup.algos.pytorch.trpo.core as core
+# from spinup.utils.logx import EpochLogger
+# from spinup.utils.mpi_tools import (
+#     mpi_avg,
+#     mpi_fork,
+#     mpi_statistics_scalar,
+#     num_procs,
+#     proc_id,
+# )
+# from spinup.utils.mpi_pytorch import (
+#     mpi_avg_grads,
+#     setup_pytorch_for_mpi,
+#     sync_params,
+# )
+
+# EPS = 1e-8
+
+
+# class GAEBuffer:
+#     """
+#     A buffer for storing trajectories experienced by a TRPO agent interacting
+#     with the environment, and using Generalized Advantage Estimation (GAE-Lambda)
+#     for calculating the advantages of state-action pairs.
+#     """
+
+#     def __init__(self, obs_dim, act_dim, size, info_shapes, gamma=0.99, lam=0.95):
+#         self.obs_buf = np.zeros(self._combined_shape(size, obs_dim), dtype=np.float32)
+#         self.act_buf = np.zeros(self._combined_shape(size, act_dim), dtype=np.float32)
+#         self.adv_buf = np.zeros(size, dtype=np.float32)
+#         self.rew_buf = np.zeros(size, dtype=np.float32)
+#         self.ret_buf = np.zeros(size, dtype=np.float32)
+#         self.val_buf = np.zeros(size, dtype=np.float32)
+#         self.logp_buf = np.zeros(size, dtype=np.float32)
+#         self.info_bufs = {
+#             k: np.zeros([size] + list(v), dtype=np.float32)
+#             for k, v in info_shapes.items()
+#         }
+#         self.sorted_info_keys = core.keys_as_sorted_list(self.info_bufs)
+#         self.gamma, self.lam = gamma, lam
+#         self.ptr, self.path_start_idx, self.max_size = 0, 0, size
+
+#     def store(self, obs, act, rew, val, logp, info):
+#         """
+#         Append one timestep of agent-environment interaction to the buffer.
+#         """
+#         assert self.ptr < self.max_size  # buffer has to have room so you can store
+#         self.obs_buf[self.ptr] = obs
+#         self.act_buf[self.ptr] = act
+#         self.rew_buf[self.ptr] = rew
+#         self.val_buf[self.ptr] = val
+#         self.logp_buf[self.ptr] = logp
+#         for i, k in enumerate(self.sorted_info_keys):
+#             self.info_bufs[k][self.ptr] = info[i]
+#         self.ptr += 1
+
+#     def finish_path(self, last_val=0):
+#         """
+#         Call this at the end of a trajectory, or when one gets cut off
+#         by an epoch ending. This looks back in the buffer to where the
+#         trajectory started, and uses rewards and value estimates from
+#         the whole trajectory to compute advantage estimates with GAE-Lambda,
+#         as well as compute the rewards-to-go for each state, to use as
+#         the targets for the value function.
+
+#         The "last_val" argument should be 0 if the trajectory ended
+#         because the agent reached a terminal state (died), and otherwise
+#         should be V(s_T), the value function estimated for the last state.
+#         This allows us to bootstrap the reward-to-go calculation to account
+#         for timesteps beyond the arbitrary episode horizon (or epoch cutoff).
+#         """
+
+#         path_slice = slice(self.path_start_idx, self.ptr)
+#         rews = np.append(self.rew_buf[path_slice], last_val)
+#         vals = np.append(self.val_buf[path_slice], last_val)
+
+#         # the next two lines implement GAE-Lambda advantage calculation
+#         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
+#         self.adv_buf[path_slice] = self._discount_cumsum(deltas, self.gamma * self.lam)
+
+#         # the next line computes rewards-to-go, to be targets for the value function
+#         self.ret_buf[path_slice] = self._discount_cumsum(rews, self.gamma)[:-1]
+
+#         self.path_start_idx = self.ptr
+
+#     def get(self):
+#         """
+#         Call this at the end of an epoch to get all of the data from
+#         the buffer, with advantages appropriately normalized (shifted to have
+#         mean zero and std one). Also, resets some pointers in the buffer.
+#         """
+#         assert self.ptr == self.max_size  # buffer has to be full before you can get
+#         self.ptr, self.path_start_idx = 0, 0
+#         # the next two lines implement the advantage normalization trick
+#         adv_mean, adv_std = mpi_statistics_scalar(self.adv_buf)
+#         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
+#         return [
+#             self.obs_buf,
+#             self.act_buf,
+#             self.adv_buf,
+#             self.ret_buf,
+#             self.logp_buf,
+#         ] + core.values_as_sorted_list(self.info_bufs)
+
+#     def _combined_shape(self, length, shape=None):
+#         if shape is None:
+#             return (length,)
+#         return (length, shape) if np.isscalar(shape) else (length, *shape)
+
+#     def _discount_cumsum(self, x, discount):
+#         """
+#         magic from rllab for computing discounted cumulative sums of vectors.
+
+#         input:
+#             vector x,
+#             [x0,
+#             x1,
+#             x2]
+
+#         output:
+#             [x0 + discount * x1 + discount^2 * x2,
+#             x1 + discount * x2,
+#             x2]
+#         """
+#         return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
+
+
+# """
+
+# Trust Region Policy Optimization
+
+# (with support for Natural Policy Gradient)
+
+# """
+
+
+# def trpo(
+#     env_fn,
+#     actor_critic=core.ActorCritic,
+#     ac_kwargs=dict(),
+#     seed=0,
+#     steps_per_epoch=4000,
+#     epochs=50,
+#     gamma=0.99,
+#     delta=0.01,
+#     vf_lr=1e-3,
+#     train_v_iters=80,
+#     damping_coeff=0.1,
+#     cg_iters=10,
+#     backtrack_iters=10,
+#     backtrack_coeff=0.8,
+#     lam=0.97,
+#     max_ep_len=1000,
+#     logger_kwargs=dict(),
+#     save_freq=1,
+#     algo="trpo",
+# ):
+#     """
+
+#     Args:
+#         env_fn : A function which creates a copy of the environment.
+#             The environment must satisfy the OpenAI Gym API.
+
+#         actor_critic: The agent's main model which for state ``x`` and
+#             action, ``a`` returns the following outputs:
+
+#             ============  ================  ========================================
+#             Symbol        Shape             Description
+#             ============  ================  ========================================
+#             ``pi``        (batch, act_dim)  | Samples actions from policy given
+#                                             | states.
+#             ``logp``      (batch,)          | Gives log probability, according to
+#                                             | the policy, of taking actions ``a``
+#                                             | in states ``x``.
+#             ``logp_pi``   (batch,)          | Gives log probability, according to
+#                                             | the policy, of the action sampled by
+#                                             | ``pi``.
+#             ``info``      N/A               | A dict of any intermediate quantities
+#                                             | (from calculating the policy or log
+#                                             | probabilities) which are needed for
+#                                             | analytically computing KL divergence.
+#                                             | (eg sufficient statistics of the
+#                                             | distributions)
+#             ``info_phs``  N/A               | A dict of placeholders for old values
+#                                             | of the entries in ``info``.
+#             ``d_kl``      ()                | The mean KL
+#                                             | divergence between the current policy
+#                                             | (``pi``) and the old policy (as
+#                                             | specified by the inputs to
+#                                             | ``info``) over the batch of
+#                                             | states given in ``x``.
+#             ``v``         (batch,)          | Gives the value estimate for states
+#                                             | in ``x``. (Critical: make sure
+#                                             | to flatten this!)
+#             ============  ================  ========================================
+
+#         ac_kwargs (dict): Any kwargs appropriate for the actor_critic
+#             function you provided to TRPO.
+
+#         seed (int): Seed for random number generators.
+
+#         steps_per_epoch (int): Number of steps of interaction (state-action pairs)
+#             for the agent and the environment in each epoch.
+
+#         epochs (int): Number of epochs of interaction (equivalent to
+#             number of policy updates) to perform.
+
+#         gamma (float): Discount factor. (Always between 0 and 1.)
+
+#         delta (float): KL-divergence limit for TRPO / NPG update.
+#             (Should be small for stability. Values like 0.01, 0.05.)
+
+#         vf_lr (float): Learning rate for value function optimizer.
+
+#         train_v_iters (int): Number of gradient descent steps to take on
+#             value function per epoch.
+
+#         damping_coeff (float): Artifact for numerical stability, should be
+#             smallish. Adjusts Hessian-vector product calculation:
+
+#             .. math:: Hv \\rightarrow (\\alpha I + H)v
+
+#             where :math:`\\alpha` is the damping coefficient.
+#             Probably don't play with this hyperparameter.
+
+#         cg_iters (int): Number of iterations of conjugate gradient to perform.
+#             Increasing this will lead to a more accurate approximation
+#             to :math:`H^{-1} g`, and possibly slightly-improved performance,
+#             but at the cost of slowing things down.
+
+#             Also probably don't play with this hyperparameter.
+
+#         backtrack_iters (int): Maximum number of steps allowed in the
+#             backtracking line search. Since the line search usually doesn't
+#             backtrack, and usually only steps back once when it does, this
+#             hyperparameter doesn't often matter.
+
+#         backtrack_coeff (float): How far back to step during backtracking line
+#             search. (Always between 0 and 1, usually above 0.5.)
+
+#         lam (float): Lambda for GAE-Lambda. (Always between 0 and 1,
+#             close to 1.)
+
+#         max_ep_len (int): Maximum length of trajectory / episode / rollout.
+
+#         logger_kwargs (dict): Keyword args for EpochLogger.
+
+#         save_freq (int): How often (in terms of gap between epochs) to save
+#             the current policy and value function.
+
+#         algo: Either 'trpo' or 'npg': this code supports both, since they are
+#             almost the same.
+
+#     """
+
+#     setup_pytorch_for_mpi()
+
+#     logger = EpochLogger(**logger_kwargs)
+#     logger.save_config(locals())
+
+#     seed += 10000 * proc_id()
+#     torch.manual_seed(seed)
+#     np.random.seed(seed)
+
+#     env = env_fn()
+#     obs_dim = env.observation_space.shape
+#     act_dim = env.action_space.shape
+
+#     # Share information about action space with policy architecture
+#     ac_kwargs["action_space"] = env.action_space
+
+#     # Main model
+#     actor_critic = actor_critic(in_features=obs_dim[0], **ac_kwargs)
+
+#     # Experience buffer
+#     local_steps_per_epoch = int(steps_per_epoch / num_procs())
+#     if isinstance(env.action_space, Box):
+#         info_shapes = {
+#             "old_mu": [env.action_space.shape[-1]],
+#             "old_log_std": [env.action_space.shape[-1]],
+#         }
+#     else:
+#         info_shapes = {"old_logits": [env.action_space.n]}
+#     buf = GAEBuffer(obs_dim, act_dim, local_steps_per_epoch, info_shapes, gamma, lam)
+
+#     # Count variables
+#     var_counts = tuple(
+#         core.count_vars(module)
+#         for module in [actor_critic.policy, actor_critic.value_function]
+#     )
+#     logger.log("\nNumber of parameters: \t pi: %d, \t v: %d\n" % var_counts)
+
+#     # Optimizer for value function
+#     train_vf = torch.optim.Adam(actor_critic.value_function.parameters(), lr=vf_lr)
+
+#     # Sync params across processes
+#     sync_params(actor_critic)
+
+#     # setup model saving
+#     logger.setup_pytorch_saver(actor_critic)
+
+#     def cg(Ax, b):
+#         """
+#         Conjugate gradient algorithm
+#         (see https://en.wikipedia.org/wiki/Conjugate_gradient_method)
+#         """
+#         x = torch.zeros_like(b)
+#         r = b  # Note: should be 'b - Ax(x)', but for x=0, Ax(x)=0. Change if doing warm start.
+#         p = b
+#         r_dot_old = torch.dot(r, r)
+#         for _ in range(cg_iters):
+#             z = Ax(p)
+#             alpha = r_dot_old / (torch.dot(p, z) + EPS)
+#             x += alpha * p
+#             r -= alpha * z
+#             r_dot_new = torch.dot(r, r)
+#             p = r + (r_dot_new / r_dot_old) * p
+#             r_dot_old = r_dot_new
+#         return x
+
+#     def update():
+#         inputs = [torch.Tensor(x) for x in buf.get()]
+#         obs, act, adv, ret, logp_old = inputs[: -len(buf.sorted_info_keys)]
+#         policy_args = dict(
+#             zip(buf.sorted_info_keys, inputs[-len(buf.sorted_info_keys) :])
+#         )
+
+#         # Main outputs from computation graph
+#         _, logp, _, _, d_kl, v = actor_critic(obs, act, **policy_args)
+
+#         # Prepare hessian func, gradient eval
+#         ratio = (logp - logp_old).exp()  # pi(a|s) / pi_old(a|s)
+#         pi_l_old = -(ratio * adv).mean()
+#         v_l_old = F.mse_loss(v, ret)
+
+#         g = core.flat_grad(
+#             pi_l_old, actor_critic.policy.parameters(), retain_graph=True
+#         )
+#         g = torch.from_numpy(mpi_avg(g.numpy()))
+#         pi_l_old = mpi_avg(pi_l_old.item())
+
+#         def Hx(x):
+#             hvp = core.hessian_vector_product(d_kl, actor_critic.policy, x)
+#             if damping_coeff > 0:
+#                 hvp += damping_coeff * x
+#             return torch.from_numpy(mpi_avg(hvp.numpy()))
+
+#         # Core calculations for TRPO or NPG
+#         x = cg(Hx, g)
+#         alpha = torch.sqrt(2 * delta / (torch.dot(x, Hx(x)) + EPS))
+#         old_params = parameters_to_vector(actor_critic.policy.parameters())
+
+#         def set_and_eval(step):
+#             vector_to_parameters(
+#                 old_params - alpha * x * step, actor_critic.policy.parameters()
+#             )
+#             _, logp, _, _, d_kl = actor_critic.policy(obs, act, **policy_args)
+#             ratio = (logp - logp_old).exp()
+#             pi_loss = -(ratio * adv).mean()
+#             return mpi_avg(d_kl.item()), mpi_avg(pi_loss.item())
+
+#         if algo == "npg":
+#             kl, pi_l_new = set_and_eval(step=1.0)
+
+#         elif algo == "trpo":
+#             for j in range(backtrack_iters):
+#                 kl, pi_l_new = set_and_eval(step=backtrack_coeff**j)
+#                 if kl <= delta and pi_l_new <= pi_l_old:
+#                     logger.log("Accepting new params at step %d of line search." % j)
+#                     logger.store(BacktrackIters=j)
+#                     break
+
+#                 if j == backtrack_iters - 1:
+#                     logger.log("Line search failed! Keeping old params.")
+#                     logger.store(BacktrackIters=j)
+#                     kl, pi_l_new = set_and_eval(step=0.0)
+
+#         # Value function updates
+#         for _ in range(train_v_iters):
+#             v = actor_critic.value_function(obs)
+#             v_loss = F.mse_loss(v, ret)
+
+#             # Value function gradient step
+#             train_vf.zero_grad()
+#             v_loss.backward()
+#             mpi_avg_grads(actor_critic.value_function)
+#             train_vf.step()
+
+#         v = actor_critic.value_function(obs)
+#         v_l_new = F.mse_loss(v, ret)
+
+#         # Log changes from update
+#         logger.store(
+#             LossPi=pi_l_old,
+#             LossV=v_l_old.item(),
+#             KL=kl,
+#             DeltaLossPi=(pi_l_new - pi_l_old).item(),
+#             DeltaLossV=(v_l_new - v_l_old).item(),
+#         )
+
+#     start_time = time.time()
+#     (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+#     max_avg_ret, avg_ret, count = float(-1e9), 0, 0
+
+#     # Main loop: collect experience in env and update/log each epoch
+#     for epoch in range(epochs):
+#         actor_critic.eval()
+#         avg_ret, count = 0, 0
+#         for t in range(local_steps_per_epoch):
+#             a, _, logp_t, info_t, _, v_t = actor_critic(torch.Tensor(o.reshape(1, -1)))
+
+#             # save and log
+#             buf.store(
+#                 o,
+#                 a.detach().numpy(),
+#                 r,
+#                 v_t.item(),
+#                 logp_t.detach().numpy(),
+#                 core.values_as_sorted_list(info_t),
+#             )
+#             logger.store(VVals=v_t.item())
+
+#             o, r, d, truncated, _ = env.step(a.detach().numpy()[0])
+#             d = d | truncated # truncated -> done
+#             ep_ret += r
+#             ep_len += 1
+
+#             terminal = d or (ep_len == max_ep_len)
+#             if terminal or (t == local_steps_per_epoch - 1):
+#                 if not (terminal):
+#                     print("Warning: trajectory cut off by epoch at %d steps." % ep_len)
+#                 # if trajectory didn't reach terminal state, bootstrap value target
+#                 last_val = (
+#                     r
+#                     if d
+#                     else actor_critic.value_function(
+#                         torch.Tensor(o.reshape(1, -1))
+#                     ).item()
+#                 )
+#                 buf.finish_path(last_val)
+#                 if terminal:
+#                     # only save EpRet / EpLen if trajectory finished
+#                     logger.store(EpRet=ep_ret, EpLen=ep_len)
+#                     avg_ret += ep_ret
+#                     count += 1
+#                 (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+
+#         # Save model
+#         if (epoch % save_freq == 0) or (epoch == epochs - 1):
+#             avg_ret = avg_ret / count
+#             if avg_ret > max_avg_ret:
+#                 print(avg_ret, max_avg_ret)
+#                 max_avg_ret = avg_ret
+#                 logger.save_state({"env": env}, epoch)
+
+#         # Perform TRPO or NPG update!
+#         actor_critic.train()
+#         update()
+
+#         # Log info about epoch
+#         logger.log_tabular("Epoch", epoch)
+#         logger.log_tabular("EpRet", with_min_and_max=True)
+#         logger.log_tabular("EpLen", average_only=True)
+#         logger.log_tabular("VVals", with_min_and_max=True)
+#         logger.log_tabular("TotalEnvInteracts", (epoch + 1) * steps_per_epoch)
+#         logger.log_tabular("LossPi", average_only=True)
+#         logger.log_tabular("LossV", average_only=True)
+#         logger.log_tabular("DeltaLossPi", average_only=True)
+#         logger.log_tabular("DeltaLossV", average_only=True)
+#         logger.log_tabular("KL", average_only=True)
+#         if algo == "trpo":
+#             logger.log_tabular("BacktrackIters", average_only=True)
+#         logger.log_tabular("Time", time.time() - start_time)
+#         logger.dump_tabular()
+
+
+# if __name__ == "__main__":
+#     import argparse
+
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument("--env", type=str, default="HalfCheetah-v2")
+#     parser.add_argument("--hid", type=int, default=64)
+#     parser.add_argument("--l", type=int, default=2)
+#     parser.add_argument("--gamma", type=float, default=0.99)
+#     parser.add_argument("--seed", "-s", type=int, default=0)
+#     parser.add_argument("--cpu", type=int, default=4)
+#     parser.add_argument("--steps", type=int, default=4000)
+#     parser.add_argument("--epochs", type=int, default=50)
+#     parser.add_argument("--exp_name", type=str, default="trpo")
+#     args = parser.parse_args()
+
+#     mpi_fork(args.cpu)  # run parallel code with mpi
+
+#     from spinup.utils.run_utils import setup_logger_kwargs
+
+#     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
+
+#     trpo(
+#         lambda: gym.make(args.env),
+#         actor_critic=core.ActorCritic,
+#         ac_kwargs=dict(hidden_sizes=[args.hid] * args.l),
+#         gamma=args.gamma,
+#         seed=args.seed,
+#         steps_per_epoch=args.steps,
+#         epochs=args.epochs,
+#         logger_kwargs=logger_kwargs,
+#     )
+
+"""
+TRPO is almost the same as PPO. The only difference is the update rule that
+1) computes the search direction via conjugate
+2) compute step by backtracking
+"""
+
 import time
 
+import gymnasium as gym
 import numpy as np
-import scipy.signal
 import torch
-import torch.nn.functional as F
-import gymnasium
-from gymnasium.spaces import Box
-# import gym
-# from gym.spaces import Box
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
+import torch.distributions
+from torch.optim import Adam
 
 import spinup.algos.pytorch.trpo.core as core
 from spinup.utils.logx import EpochLogger
-from spinup.utils.mpi_tools import (
-    mpi_avg,
-    mpi_fork,
-    mpi_statistics_scalar,
-    num_procs,
-    proc_id,
-)
-from spinup.utils.mpi_pytorch import (
-    mpi_avg_grads,
-    setup_pytorch_for_mpi,
-    sync_params,
-)
+from spinup.utils.mpi_pytorch import mpi_avg_grads, sync_params, setup_pytorch_for_mpi
+from spinup.utils.mpi_tools import mpi_fork, proc_id, mpi_statistics_scalar, num_procs
 
 EPS = 1e-8
 
@@ -35,23 +546,18 @@ class GAEBuffer:
     for calculating the advantages of state-action pairs.
     """
 
-    def __init__(self, obs_dim, act_dim, size, info_shapes, gamma=0.99, lam=0.95):
-        self.obs_buf = np.zeros(self._combined_shape(size, obs_dim), dtype=np.float32)
-        self.act_buf = np.zeros(self._combined_shape(size, act_dim), dtype=np.float32)
+    def __init__(self, obs_dim, act_dim, size, gamma=0.99, lam=0.95):
+        self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
+        self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
         self.ret_buf = np.zeros(size, dtype=np.float32)
         self.val_buf = np.zeros(size, dtype=np.float32)
         self.logp_buf = np.zeros(size, dtype=np.float32)
-        self.info_bufs = {
-            k: np.zeros([size] + list(v), dtype=np.float32)
-            for k, v in info_shapes.items()
-        }
-        self.sorted_info_keys = core.keys_as_sorted_list(self.info_bufs)
         self.gamma, self.lam = gamma, lam
         self.ptr, self.path_start_idx, self.max_size = 0, 0, size
 
-    def store(self, obs, act, rew, val, logp, info):
+    def store(self, obs, act, rew, val, logp):
         """
         Append one timestep of agent-environment interaction to the buffer.
         """
@@ -61,8 +567,6 @@ class GAEBuffer:
         self.rew_buf[self.ptr] = rew
         self.val_buf[self.ptr] = val
         self.logp_buf[self.ptr] = logp
-        for i, k in enumerate(self.sorted_info_keys):
-            self.info_bufs[k][self.ptr] = info[i]
         self.ptr += 1
 
     def finish_path(self, last_val=0):
@@ -73,7 +577,6 @@ class GAEBuffer:
         the whole trajectory to compute advantage estimates with GAE-Lambda,
         as well as compute the rewards-to-go for each state, to use as
         the targets for the value function.
-
         The "last_val" argument should be 0 if the trajectory ended
         because the agent reached a terminal state (died), and otherwise
         should be V(s_T), the value function estimated for the last state.
@@ -87,10 +590,10 @@ class GAEBuffer:
 
         # the next two lines implement GAE-Lambda advantage calculation
         deltas = rews[:-1] + self.gamma * vals[1:] - vals[:-1]
-        self.adv_buf[path_slice] = self._discount_cumsum(deltas, self.gamma * self.lam)
+        self.adv_buf[path_slice] = core.discount_cumsum(deltas, self.gamma * self.lam)
 
         # the next line computes rewards-to-go, to be targets for the value function
-        self.ret_buf[path_slice] = self._discount_cumsum(rews, self.gamma)[:-1]
+        self.ret_buf[path_slice] = core.discount_cumsum(rews, self.gamma)[:-1]
 
         self.path_start_idx = self.ptr
 
@@ -105,391 +608,321 @@ class GAEBuffer:
         # the next two lines implement the advantage normalization trick
         adv_mean, adv_std = mpi_statistics_scalar(self.adv_buf)
         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
-        return [
-            self.obs_buf,
-            self.act_buf,
-            self.adv_buf,
-            self.ret_buf,
-            self.logp_buf,
-        ] + core.values_as_sorted_list(self.info_bufs)
-
-    def _combined_shape(self, length, shape=None):
-        if shape is None:
-            return (length,)
-        return (length, shape) if np.isscalar(shape) else (length, *shape)
-
-    def _discount_cumsum(self, x, discount):
-        """
-        magic from rllab for computing discounted cumulative sums of vectors.
-
-        input:
-            vector x,
-            [x0,
-            x1,
-            x2]
-
-        output:
-            [x0 + discount * x1 + discount^2 * x2,
-            x1 + discount * x2,
-            x2]
-        """
-        return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
+        data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
+                    adv=self.adv_buf, logp=self.logp_buf)
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in data.items()}
 
 
-"""
-
-Trust Region Policy Optimization
-
-(with support for Natural Policy Gradient)
-
-"""
-
-
-def trpo(
-    env_fn,
-    actor_critic=core.ActorCritic,
-    ac_kwargs=dict(),
-    seed=0,
-    steps_per_epoch=4000,
-    epochs=50,
-    gamma=0.99,
-    delta=0.01,
-    vf_lr=1e-3,
-    train_v_iters=80,
-    damping_coeff=0.1,
-    cg_iters=10,
-    backtrack_iters=10,
-    backtrack_coeff=0.8,
-    lam=0.97,
-    max_ep_len=1000,
-    logger_kwargs=dict(),
-    save_freq=10,
-    algo="trpo",
-):
+def trpo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
+         steps_per_epoch=4000, epochs=50, gamma=0.99, delta=0.01, vf_lr=1e-3,
+         train_v_iters=80, damping_coeff=0.1, cg_iters=10, backtrack_iters=10,
+         backtrack_coeff=0.8, lam=0.97, max_ep_len=1000, logger_kwargs=dict(),
+         save_freq=1, algo='trpo'):
     """
-
+    Trust Region Policy Optimization
+    (with support for Natural Policy Gradient)
     Args:
         env_fn : A function which creates a copy of the environment.
             The environment must satisfy the OpenAI Gym API.
-
-        actor_critic: The agent's main model which for state ``x`` and
-            action, ``a`` returns the following outputs:
-
-            ============  ================  ========================================
-            Symbol        Shape             Description
-            ============  ================  ========================================
-            ``pi``        (batch, act_dim)  | Samples actions from policy given
-                                            | states.
-            ``logp``      (batch,)          | Gives log probability, according to
-                                            | the policy, of taking actions ``a``
-                                            | in states ``x``.
-            ``logp_pi``   (batch,)          | Gives log probability, according to
-                                            | the policy, of the action sampled by
-                                            | ``pi``.
-            ``info``      N/A               | A dict of any intermediate quantities
-                                            | (from calculating the policy or log
-                                            | probabilities) which are needed for
-                                            | analytically computing KL divergence.
-                                            | (eg sufficient statistics of the
-                                            | distributions)
-            ``info_phs``  N/A               | A dict of placeholders for old values
-                                            | of the entries in ``info``.
-            ``d_kl``      ()                | The mean KL
-                                            | divergence between the current policy
-                                            | (``pi``) and the old policy (as
-                                            | specified by the inputs to
-                                            | ``info``) over the batch of
-                                            | states given in ``x``.
-            ``v``         (batch,)          | Gives the value estimate for states
-                                            | in ``x``. (Critical: make sure
-                                            | to flatten this!)
-            ============  ================  ========================================
-
+        actor_critic: The constructor method for a PyTorch Module with a
+            ``step`` method, an ``act`` method, a ``pi`` module, and a ``v``
+            module. The ``step`` method should accept a batch of observations
+            and return:
+            ===========  ================  ======================================
+            Symbol       Shape             Description
+            ===========  ================  ======================================
+            ``a``        (batch, act_dim)  | Numpy array of actions for each
+                                           | observation.
+            ``v``        (batch,)          | Numpy array of value estimates
+                                           | for the provided observations.
+            ``logp_a``   (batch,)          | Numpy array of log probs for the
+                                           | actions in ``a``.
+            ===========  ================  ======================================
+            The ``act`` method behaves the same as ``step`` but only returns ``a``.
+            The ``pi`` module's forward call should accept a batch of
+            observations and optionally a batch of actions, and return:
+            ===========  ================  ======================================
+            Symbol       Shape             Description
+            ===========  ================  ======================================
+            ``pi``       N/A               | Torch Distribution object, containing
+                                           | a batch of distributions describing
+                                           | the policy for the provided observations.
+            ``logp_a``   (batch,)          | Optional (only returned if batch of
+                                           | actions is given). Tensor containing
+                                           | the log probability, according to
+                                           | the policy, of the provided actions.
+                                           | If actions not given, will contain
+                                           | ``None``.
+            ===========  ================  ======================================
+            The ``v`` module's forward call should accept a batch of observations
+            and return:
+            ===========  ================  ======================================
+            Symbol       Shape             Description
+            ===========  ================  ======================================
+            ``v``        (batch,)          | Tensor containing the value estimates
+                                           | for the provided observations. (Critical:
+                                           | make sure to flatten this!)
+            ===========  ================  ======================================
         ac_kwargs (dict): Any kwargs appropriate for the actor_critic
             function you provided to TRPO.
-
         seed (int): Seed for random number generators.
-
         steps_per_epoch (int): Number of steps of interaction (state-action pairs)
             for the agent and the environment in each epoch.
-
         epochs (int): Number of epochs of interaction (equivalent to
             number of policy updates) to perform.
-
         gamma (float): Discount factor. (Always between 0 and 1.)
-
         delta (float): KL-divergence limit for TRPO / NPG update.
             (Should be small for stability. Values like 0.01, 0.05.)
-
         vf_lr (float): Learning rate for value function optimizer.
-
         train_v_iters (int): Number of gradient descent steps to take on
             value function per epoch.
-
         damping_coeff (float): Artifact for numerical stability, should be
             smallish. Adjusts Hessian-vector product calculation:
-
             .. math:: Hv \\rightarrow (\\alpha I + H)v
-
             where :math:`\\alpha` is the damping coefficient.
             Probably don't play with this hyperparameter.
-
         cg_iters (int): Number of iterations of conjugate gradient to perform.
             Increasing this will lead to a more accurate approximation
             to :math:`H^{-1} g`, and possibly slightly-improved performance,
             but at the cost of slowing things down.
-
             Also probably don't play with this hyperparameter.
-
         backtrack_iters (int): Maximum number of steps allowed in the
             backtracking line search. Since the line search usually doesn't
             backtrack, and usually only steps back once when it does, this
             hyperparameter doesn't often matter.
-
         backtrack_coeff (float): How far back to step during backtracking line
             search. (Always between 0 and 1, usually above 0.5.)
-
         lam (float): Lambda for GAE-Lambda. (Always between 0 and 1,
             close to 1.)
-
         max_ep_len (int): Maximum length of trajectory / episode / rollout.
-
         logger_kwargs (dict): Keyword args for EpochLogger.
-
         save_freq (int): How often (in terms of gap between epochs) to save
             the current policy and value function.
-
         algo: Either 'trpo' or 'npg': this code supports both, since they are
             almost the same.
-
     """
 
+    # Special function to avoid certain slowdowns from PyTorch + MPI combo.
     setup_pytorch_for_mpi()
 
+    # Set up logger and save configuration
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
 
+    # Random seed
     seed += 10000 * proc_id()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+    # Instantiate environment
     env = env_fn()
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape
 
-    # Share information about action space with policy architecture
-    ac_kwargs["action_space"] = env.action_space
-
-    # Main model
-    actor_critic = actor_critic(in_features=obs_dim[0], **ac_kwargs)
-
-    # Experience buffer
-    local_steps_per_epoch = int(steps_per_epoch / num_procs())
-    if isinstance(env.action_space, Box):
-        info_shapes = {
-            "old_mu": [env.action_space.shape[-1]],
-            "old_log_std": [env.action_space.shape[-1]],
-        }
-    else:
-        info_shapes = {"old_logits": [env.action_space.n]}
-    buf = GAEBuffer(obs_dim, act_dim, local_steps_per_epoch, info_shapes, gamma, lam)
-
-    # Count variables
-    var_counts = tuple(
-        core.count_vars(module)
-        for module in [actor_critic.policy, actor_critic.value_function]
-    )
-    logger.log("\nNumber of parameters: \t pi: %d, \t v: %d\n" % var_counts)
-
-    # Optimizer for value function
-    train_vf = torch.optim.Adam(actor_critic.value_function.parameters(), lr=vf_lr)
+    # Create actor-critic module
+    ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
     # Sync params across processes
-    sync_params(actor_critic)
+    sync_params(ac)
 
-    # setup model saving
-    logger.setup_pytorch_saver(actor_critic)
+    # Count variables
+    var_counts = tuple(core.count_vars(module) for module in [ac.pi, ac.v])
+    logger.log('\nNumber of parameters: \t pi: %d, \t v: %d\n' % var_counts)
 
-    def cg(Ax, b):
-        """
-        Conjugate gradient algorithm
-        (see https://en.wikipedia.org/wiki/Conjugate_gradient_method)
-        """
-        x = torch.zeros_like(b)
-        r = b  # Note: should be 'b - Ax(x)', but for x=0, Ax(x)=0. Change if doing warm start.
-        p = b
-        r_dot_old = torch.dot(r, r)
-        for _ in range(cg_iters):
-            z = Ax(p)
-            alpha = r_dot_old / (torch.dot(p, z) + EPS)
-            x += alpha * p
-            r -= alpha * z
-            r_dot_new = torch.dot(r, r)
-            p = r + (r_dot_new / r_dot_old) * p
-            r_dot_old = r_dot_new
-        return x
+    # Set up experience buffer
+    local_steps_per_epoch = int(steps_per_epoch / num_procs())
+    buf = GAEBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
+
+    def compute_loss_pi(data):
+        obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
+        # Policy loss
+        _, logp = ac.pi(obs, act)
+        ratio = torch.exp(logp - logp_old)
+        loss_pi = -(ratio * adv).mean()
+        return loss_pi
+
+    # Set up function for computing value loss
+    def compute_loss_v(data):
+        obs, ret = data['obs'], data['ret']
+        return ((ac.v(obs) - ret) ** 2).mean()
+
+    def compute_kl(data, old_pi):
+        obs, act = data['obs'], data['act']
+        pi, _ = ac.pi(obs, act)
+        kl_loss = torch.distributions.kl_divergence(pi, old_pi).mean()
+        return kl_loss
+
+    @torch.no_grad()
+    def compute_kl_loss_pi(data, old_pi):
+        obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
+        # Policy loss
+        pi, logp = ac.pi(obs, act)
+        ratio = torch.exp(logp - logp_old)
+        loss_pi = -(ratio * adv).mean()
+        kl_loss = torch.distributions.kl_divergence(pi, old_pi).mean()
+        return loss_pi, kl_loss
+
+    def hessian_vector_product(data, old_pi, v):
+        kl = compute_kl(data, old_pi)
+
+        grads = torch.autograd.grad(kl, ac.pi.parameters(), create_graph=True)
+        flat_grad_kl = core.flat_grads(grads)
+
+        kl_v = (flat_grad_kl * v).sum()
+        grads = torch.autograd.grad(kl_v, ac.pi.parameters())
+        flat_grad_grad_kl = core.flat_grads(grads)
+
+        return flat_grad_grad_kl + v * damping_coeff
+
+    # Set up optimizers for policy and value function
+    vf_optimizer = Adam(ac.v.parameters(), lr=vf_lr)
+
+    # Set up model saving
+    logger.setup_pytorch_saver(ac)
 
     def update():
-        inputs = [torch.Tensor(x) for x in buf.get()]
-        obs, act, adv, ret, logp_old = inputs[: -len(buf.sorted_info_keys)]
-        policy_args = dict(
-            zip(buf.sorted_info_keys, inputs[-len(buf.sorted_info_keys) :])
-        )
+        data = buf.get()
 
-        # Main outputs from computation graph
-        _, logp, _, _, d_kl, v = actor_critic(obs, act, **policy_args)
+        # compute old pi distribution
+        obs, act = data['obs'], data['act']
+        with torch.no_grad():
+            old_pi, _ = ac.pi(obs, act)
 
-        # Prepare hessian func, gradient eval
-        ratio = (logp - logp_old).exp()  # pi(a|s) / pi_old(a|s)
-        pi_l_old = -(ratio * adv).mean()
-        v_l_old = F.mse_loss(v, ret)
+        pi_loss = compute_loss_pi(data)
+        pi_l_old = pi_loss.item()
+        v_l_old = compute_loss_v(data).item()
 
-        g = core.flat_grad(
-            pi_l_old, actor_critic.policy.parameters(), retain_graph=True
-        )
-        g = torch.from_numpy(mpi_avg(g.numpy()))
-        pi_l_old = mpi_avg(pi_l_old.item())
-
-        def Hx(x):
-            hvp = core.hessian_vector_product(d_kl, actor_critic.policy, x)
-            if damping_coeff > 0:
-                hvp += damping_coeff * x
-            return torch.from_numpy(mpi_avg(hvp.numpy()))
+        grads = core.flat_grads(torch.autograd.grad(pi_loss, ac.pi.parameters()))
 
         # Core calculations for TRPO or NPG
-        x = cg(Hx, g)
-        alpha = torch.sqrt(2 * delta / (torch.dot(x, Hx(x)) + EPS))
-        old_params = parameters_to_vector(actor_critic.policy.parameters())
+        Hx = lambda v: hessian_vector_product(data, old_pi, v)
+        x = core.conjugate_gradients(Hx, grads, cg_iters)
+
+        alpha = torch.sqrt(2 * delta / (torch.matmul(x, Hx(x)) + EPS))
+
+        old_params = core.get_flat_params_from(ac.pi)
 
         def set_and_eval(step):
-            vector_to_parameters(
-                old_params - alpha * x * step, actor_critic.policy.parameters()
-            )
-            _, logp, _, _, d_kl = actor_critic.policy(obs, act, **policy_args)
-            ratio = (logp - logp_old).exp()
-            pi_loss = -(ratio * adv).mean()
-            return mpi_avg(d_kl.item()), mpi_avg(pi_loss.item())
+            new_params = old_params - alpha * x * step
+            core.set_flat_params_to(ac.pi, new_params)
+            loss_pi, kl_loss = compute_kl_loss_pi(data, old_pi)
+            return kl_loss.item(), loss_pi.item()
 
-        if algo == "npg":
-            kl, pi_l_new = set_and_eval(step=1.0)
+        if algo == 'npg':
+            # npg has no backtracking or hard kl constraint enforcement
+            kl, pi_l_new = set_and_eval(step=1.)
 
-        elif algo == "trpo":
+        elif algo == 'trpo':
+            # trpo augments npg with backtracking line search, hard kl
             for j in range(backtrack_iters):
-                kl, pi_l_new = set_and_eval(step=backtrack_coeff**j)
+                kl, pi_l_new = set_and_eval(step=backtrack_coeff ** j)
                 if kl <= delta and pi_l_new <= pi_l_old:
-                    logger.log("Accepting new params at step %d of line search." % j)
+                    logger.log('Accepting new params at step %d of line search.' % j)
                     logger.store(BacktrackIters=j)
                     break
 
                 if j == backtrack_iters - 1:
-                    logger.log("Line search failed! Keeping old params.")
+                    logger.log('Line search failed! Keeping old params.')
                     logger.store(BacktrackIters=j)
-                    kl, pi_l_new = set_and_eval(step=0.0)
+                    kl, pi_l_new = set_and_eval(step=0.)
 
-        # Value function updates
-        for _ in range(train_v_iters):
-            v = actor_critic.value_function(obs)
-            v_loss = F.mse_loss(v, ret)
-
-            # Value function gradient step
-            train_vf.zero_grad()
-            v_loss.backward()
-            mpi_avg_grads(actor_critic.value_function)
-            train_vf.step()
-
-        v = actor_critic.value_function(obs)
-        v_l_new = F.mse_loss(v, ret)
+        # Value function learning
+        for i in range(train_v_iters):
+            vf_optimizer.zero_grad()
+            loss_v = compute_loss_v(data)
+            loss_v.backward()
+            mpi_avg_grads(ac.v)  # average grads across MPI processes
+            vf_optimizer.step()
 
         # Log changes from update
-        logger.store(
-            LossPi=pi_l_old,
-            LossV=v_l_old.item(),
-            KL=kl,
-            DeltaLossPi=(pi_l_new - pi_l_old).item(),
-            DeltaLossV=(v_l_new - v_l_old).item(),
-        )
+        logger.store(LossPi=pi_l_old, LossV=v_l_old, KL=kl,
+                     DeltaLossPi=(pi_l_new - pi_l_old),
+                     DeltaLossV=(loss_v.item() - v_l_old))
 
+    # Prepare for interaction with environment
     start_time = time.time()
-    (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+    (o, _), ep_ret, ep_len = env.reset(), 0, 0
+    max_avg_ret, avg_ret, count = float(-1e9), 0, 0
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-        actor_critic.eval()
+        avg_ret, count = 0, 0
         for t in range(local_steps_per_epoch):
-            a, _, logp_t, info_t, _, v_t = actor_critic(torch.Tensor(o.reshape(1, -1)))
+            a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
-            # save and log
-            buf.store(
-                o,
-                a.detach().numpy(),
-                r,
-                v_t.item(),
-                logp_t.detach().numpy(),
-                core.values_as_sorted_list(info_t),
-            )
-            logger.store(VVals=v_t.item())
-
-            o, r, d, truncated, _ = env.step(a.detach().numpy()[0])
-            d = d | truncated # truncated -> done
+            next_o, r, d, truncated, _ = env.step(a)
+            d = d | truncated
             ep_ret += r
             ep_len += 1
 
-            terminal = d or (ep_len == max_ep_len)
-            if terminal or (t == local_steps_per_epoch - 1):
-                if not (terminal):
-                    print("Warning: trajectory cut off by epoch at %d steps." % ep_len)
+            # save and log
+            buf.store(o, a, r, v, logp)
+            logger.store(VVals=v)
+
+            # Update obs (critical!)
+            o = next_o
+
+            timeout = ep_len == max_ep_len
+            terminal = d or timeout
+            epoch_ended = t == local_steps_per_epoch - 1
+
+            if terminal or epoch_ended:
+                if epoch_ended and not (terminal):
+                    print('Warning: trajectory cut off by epoch at %d steps.' % ep_len, flush=True)
                 # if trajectory didn't reach terminal state, bootstrap value target
-                last_val = (
-                    r
-                    if d
-                    else actor_critic.value_function(
-                        torch.Tensor(o.reshape(1, -1))
-                    ).item()
-                )
-                buf.finish_path(last_val)
+                if timeout or epoch_ended:
+                    _, v, _ = ac.step(torch.as_tensor(o, dtype=torch.float32))
+                else:
+                    v = 0
+                buf.finish_path(v)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
+                    avg_ret += ep_ret
+                    count += 1
+                (o, _), ep_ret, ep_len = env.reset(), 0, 0
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs - 1):
-            logger.save_state({"env": env}, None)
+            avg_ret = avg_ret / count
+            if max_avg_ret < avg_ret:
+                print(avg_ret, max_avg_ret)
+                max_avg_ret = avg_ret
+                logger.save_state({'env': env}, None)
 
-        # Perform TRPO or NPG update!
-        actor_critic.train()
+        # Perform TRPO update!
         update()
 
         # Log info about epoch
-        logger.log_tabular("Epoch", epoch)
-        logger.log_tabular("EpRet", with_min_and_max=True)
-        logger.log_tabular("EpLen", average_only=True)
-        logger.log_tabular("VVals", with_min_and_max=True)
-        logger.log_tabular("TotalEnvInteracts", (epoch + 1) * steps_per_epoch)
-        logger.log_tabular("LossPi", average_only=True)
-        logger.log_tabular("LossV", average_only=True)
-        logger.log_tabular("DeltaLossPi", average_only=True)
-        logger.log_tabular("DeltaLossV", average_only=True)
-        logger.log_tabular("KL", average_only=True)
-        if algo == "trpo":
-            logger.log_tabular("BacktrackIters", average_only=True)
-        logger.log_tabular("Time", time.time() - start_time)
+        logger.log_tabular('Epoch', epoch)
+        logger.log_tabular('EpRet', with_min_and_max=True)
+        logger.log_tabular('EpLen', average_only=True)
+        logger.log_tabular('VVals', with_min_and_max=True)
+        logger.log_tabular('TotalEnvInteracts', (epoch + 1) * steps_per_epoch)
+        logger.log_tabular('LossPi', average_only=True)
+        logger.log_tabular('LossV', average_only=True)
+        logger.log_tabular('DeltaLossPi', average_only=True)
+        logger.log_tabular('DeltaLossV', average_only=True)
+        logger.log_tabular('KL', average_only=True)
+        if algo == 'trpo':
+            logger.log_tabular('BacktrackIters', average_only=True)
+        logger.log_tabular('Time', time.time() - start_time)
         logger.dump_tabular()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", type=str, default="HalfCheetah-v2")
-    parser.add_argument("--hid", type=int, default=64)
-    parser.add_argument("--l", type=int, default=2)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--seed", "-s", type=int, default=0)
-    parser.add_argument("--cpu", type=int, default=4)
-    parser.add_argument("--steps", type=int, default=4000)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--exp_name", type=str, default="trpo")
+    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
+    parser.add_argument('--hid', type=int, default=64)
+    parser.add_argument('--l', type=int, default=2)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--cpu', type=int, default=4)
+    parser.add_argument('--steps', type=int, default=4000)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--exp_name', type=str, default='trpo')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
@@ -498,13 +931,7 @@ if __name__ == "__main__":
 
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    trpo(
-        lambda: gym.make(args.env),
-        actor_critic=core.ActorCritic,
-        ac_kwargs=dict(hidden_sizes=[args.hid] * args.l),
-        gamma=args.gamma,
-        seed=args.seed,
-        steps_per_epoch=args.steps,
-        epochs=args.epochs,
-        logger_kwargs=logger_kwargs,
-    )
+    trpo(lambda: gym.make(args.env), actor_critic=core.MLPActorCritic,
+         ac_kwargs=dict(hidden_sizes=[args.hid] * args.l), gamma=args.gamma,
+         seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
+         logger_kwargs=logger_kwargs)
