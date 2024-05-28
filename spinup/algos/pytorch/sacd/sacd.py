@@ -77,7 +77,7 @@ class SAC(nn.Module):
         self.action_size = action_size
         
         self.gamma = 0.99
-        self.tau = 1e-2
+        self.tau = 0.05
         self.clip_grad_param = 1
 
         self.target_entropy = -action_size  # -dim(A)
@@ -220,7 +220,7 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
         epochs=100, replay_size=int(1e6), gamma=0.99, 
         polyak=0.995, lr=1e-3, batch_size=100, start_steps=10000, 
         update_after=1000, update_every=50, num_test_episodes=10, 
-        max_ep_len=1000, logger_kwargs=dict(), save_freq=10):
+        max_ep_len=1000, logger_kwargs=dict(), save_freq=1):
     
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
@@ -240,15 +240,13 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
 
     # save model
     logger.setup_pytorch_saver(agent.actor_local)
+    logger.log("number of pi parameters: " + str(core.count_vars(agent.actor_local)))
 
     buffer = ReplayBuffer(buffer_size=replay_size, batch_size=batch_size)
     
     start_time = time.time()
     (state, _), episode_steps, rewards = env.reset(), 0, 0
     total_steps = epochs * steps_per_epoch
-    max_avg_ret = -1e9
-    avg_ret = 0
-    count = 0
 
     for t in range(total_steps):
         if t > start_steps:
@@ -276,22 +274,14 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
 
         if terminal:
             logger.store(EpRet=rewards, EpLen=episode_steps)
-            avg_ret += rewards
-            count += 1
             (state, _), episode_steps, rewards = env.reset(), 0, 0
 
         if (t+1) % steps_per_epoch == 0:
             epoch = (t+1) // steps_per_epoch
             
             if (epoch % save_freq == 0) or (epoch == epochs - 1):
-                avg_ret = avg_ret / count 
-                if avg_ret > max_avg_ret:
-                    print(avg_ret, max_avg_ret)
-                    max_avg_ret = avg_ret
-                    logger.save_state({'env': env}, epoch)
-            
-            avg_ret, count = 0, 0
-            
+                logger.save_state({'env': env}, epoch)
+                        
             logger.log_tabular('Epoch', epoch)
             logger.log_tabular('EpRet', with_min_and_max=True)
             logger.log_tabular('EpLen', average_only=True)

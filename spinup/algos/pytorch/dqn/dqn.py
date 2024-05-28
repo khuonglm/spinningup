@@ -135,7 +135,6 @@ def dqn(
     start_time = time.time()
     (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
     total_steps = steps_per_epoch * epochs
-    max_avg_ret, avg_ret, count = float(-1e9), 0, 0
 
     # Main loop: collect experience in env and update/log each epoch
     for t in range(total_steps):
@@ -167,8 +166,6 @@ def dqn(
 
         if d or (ep_len == max_ep_len):
             logger.store(EpRet=ep_ret, EpLen=ep_len)
-            avg_ret += ep_ret
-            count += 1
             (o, _), r, d, ep_ret, ep_len = env.reset(), 0, False, 0, 0
 
         # train at the rate of update_period if enough training steps have been run
@@ -207,15 +204,10 @@ def dqn(
 
             # Save model
             if (epoch % save_freq == 0) or (epoch == epochs - 1):
-                avg_ret = avg_ret / count
-                if avg_ret > max_avg_ret:
-                    print(avg_ret, max_avg_ret)
-                    max_avg_ret = avg_ret
-                    logger.save_state({"env": env}, epoch)
+                logger.save_state({"env": env}, epoch)
 
             # Test the performance of the deterministic version of the agent.
             test_agent()
-            avg_ret, count = 0, 0
 
             # Log info about epoch
             logger.log_tabular("Epoch", epoch)

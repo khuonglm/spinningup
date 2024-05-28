@@ -89,7 +89,7 @@ class PPOBuffer:
 def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
         vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+        target_kl=0.01, logger_kwargs=dict(), save_freq=1):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -228,9 +228,6 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     def compute_loss_pi(data):
         obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
 
-        # if len(adv) > 1:
-        #     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
         # Policy loss
         pi, logp = ac.pi(obs, act)
         ratio = torch.exp(logp - logp_old)
@@ -298,12 +295,8 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     start_time = time.time()
     (o, _), ep_ret, ep_len = env.reset(), 0, 0
 
-    # for saving the best performance model
-    max_avg_ret = float(-1e9)
-
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-        avg_ret, count = 0, 0
         for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
@@ -335,18 +328,12 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                    avg_ret += ep_ret
-                    count += 1
                 (o, _), ep_ret, ep_len = env.reset(), 0, 0
 
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
-            avg_ret = float(avg_ret / (count + 1))
-            if avg_ret > max_avg_ret:
-                print(avg_ret, max_avg_ret)
-                logger.save_state({'env': env}, epoch)
-                max_avg_ret = avg_ret
+            logger.save_state({'env': env}, epoch)
 
         # Perform PPO update!
         update()

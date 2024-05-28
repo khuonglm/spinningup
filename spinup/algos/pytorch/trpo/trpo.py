@@ -842,11 +842,9 @@ def trpo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     # Prepare for interaction with environment
     start_time = time.time()
     (o, _), ep_ret, ep_len = env.reset(), 0, 0
-    max_avg_ret, avg_ret, count = float(-1e9), 0, 0
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
-        avg_ret, count = 0, 0
         for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(torch.as_tensor(o, dtype=torch.float32))
 
@@ -878,17 +876,11 @@ def trpo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
-                    avg_ret += ep_ret
-                    count += 1
                 (o, _), ep_ret, ep_len = env.reset(), 0, 0
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs - 1):
-            avg_ret = avg_ret / count
-            if max_avg_ret < avg_ret:
-                print(avg_ret, max_avg_ret)
-                max_avg_ret = avg_ret
-                logger.save_state({'env': env}, epoch)
+            logger.save_state({'env': env}, epoch)
 
         # Perform TRPO update!
         update()
