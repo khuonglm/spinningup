@@ -150,9 +150,9 @@ def run_policy_file(env, get_action, max_ep_len=None, num_episodes=100, render=F
     # env = gym.make("Pong-ramNoFrameskip-v4", render_mode='human')
     (o, _), r, d, ep_ret, ep_len, n = env.reset(), 0, False, 0, 0, 0
     while n < num_episodes:
-        if render:
-            env.render()
-            time.sleep(1e-3)
+        # if render:
+        #     env.render()
+        #     time.sleep(1e-3)
 
         a = get_action(o)
         o, r, d, t, _ = env.step(a)
