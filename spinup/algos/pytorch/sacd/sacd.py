@@ -165,6 +165,7 @@ class SAC(nn.Module):
 
             # Compute Q targets for current states (y_i)
             Q_targets = rewards + (gamma * (1 - dones) * Q_target_next.sum(dim=1).unsqueeze(-1)) 
+            meanq = Q_targets.mean()
 
         # Compute critic loss
         q1 = self.critic1(states).gather(1, actions.long())
@@ -189,7 +190,7 @@ class SAC(nn.Module):
         self.soft_update(self.critic1, self.critic1_target)
         self.soft_update(self.critic2, self.critic2_target)
         
-        return actor_loss.item(), alpha_loss.item(), critic1_loss.item(), critic2_loss.item(), current_alpha
+        return actor_loss.item(), alpha_loss.item(), critic1_loss.item(), critic2_loss.item(), current_alpha, meanq.item()
 
     def soft_update(self, local_model , target_model):
         """Soft update model parameters.
@@ -267,7 +268,8 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
 
         if t >= update_after and t % update_every == 0:
             for _ in range(update_every):
-                policy_loss, alpha_loss, bellmann_error1, bellmann_error2, current_alpha = agent.learn(buffer.sample(), gamma)
+                policy_loss, alpha_loss, bellmann_error1, bellmann_error2, current_alpha, q = agent.learn(buffer.sample(), gamma)
+                logger.store(QVals=q)
                 logger.store(LossPi=policy_loss, AlphaLoss=alpha_loss)
                 logger.store(BelErr1=bellmann_error1, BelErr2=bellmann_error2)
                 logger.store(CurAlpha=current_alpha)
@@ -286,6 +288,7 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
             logger.log_tabular('EpRet', with_min_and_max=True)
             logger.log_tabular('EpLen', average_only=True)
             logger.log_tabular('TotalEnvInteracts', (epoch+1)*steps_per_epoch)
+            logger.log_tabular('QVals', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
             logger.log_tabular('AlphaLoss', average_only=True)
             logger.log_tabular('BelErr1', average_only=True)
