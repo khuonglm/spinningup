@@ -11,6 +11,12 @@ def combined_shape(length, shape=None):
     return (length, shape) if np.isscalar(shape) else (length, *shape)
 
 
+def hidden_init(layer):
+    fan_in = layer.weight.data.size()[0]
+    lim = 1. / np.sqrt(fan_in)
+    return (-lim, lim)
+
+
 def mlp(sizes, activation, output_activation=nn.Identity):
     layers = []
     for j in range(len(sizes)-1):
@@ -75,6 +81,9 @@ class Critic(nn.Module):
             [state_size] + hidden_sizes + [action_size],
             nn.ReLU
         )
+        for layer in self.q_function.children():
+            if isinstance(layer, nn.Linear):
+                layer.weight.data.uniform_(*hidden_init(layer))
 
     def forward(self, state):
         return self.q_function(state)
