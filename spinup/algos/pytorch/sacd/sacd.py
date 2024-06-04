@@ -77,7 +77,7 @@ class SAC(nn.Module):
         self.action_size = action_size
         
         self.gamma = 0.99
-        self.tau = 0.05
+        self.tau = 0.01
         self.clip_grad_param = 1
 
         self.target_entropy = -action_size  # -dim(A)
@@ -221,7 +221,7 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
         epochs=100, replay_size=int(1e6), gamma=0.99, 
         polyak=0.995, lr=1e-3, batch_size=100, start_steps=10000, 
         update_after=1000, update_every=50, num_test_episodes=10, 
-        max_ep_len=1000, logger_kwargs=dict(), save_freq=1):
+        max_ep_len=1000, logger_kwargs=dict(), save_freq=10):
     
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
@@ -231,6 +231,7 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
     torch.manual_seed(seed)
 
     env = env_fn()
+    test_env = env_fn()
     # env.seed(seed)
     # env.action_space.seed(seed)
 
@@ -250,7 +251,7 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
     total_steps = epochs * steps_per_epoch
 
     for t in range(total_steps):
-        if t > start_steps:
+        if t >= start_steps:
             action = agent.get_action(state)
         else:
             action = env.action_space.sample()
@@ -266,7 +267,7 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
         timeout = episode_steps == max_ep_len
         terminal = done or timeout
 
-        if t >= update_after and t % update_every == 0:
+        if t >= start_steps and t % update_every == 0:
             for _ in range(update_every):
                 policy_loss, alpha_loss, bellmann_error1, bellmann_error2, current_alpha, q = agent.learn(buffer.sample(), gamma)
                 logger.store(QVals=q)
@@ -278,15 +279,30 @@ def sacd(env_fn, ac_kwargs=dict(), seed=0, steps_per_epoch=4000,
             logger.store(EpRet=rewards, EpLen=episode_steps)
             (state, _), episode_steps, rewards = env.reset(), 0, 0
 
-        if (t+1) % steps_per_epoch == 0:
+        if t >= start_steps and (t+1) % steps_per_epoch == 0:
             epoch = (t+1) // steps_per_epoch
             
+            def test_agent(n=10):
+                for _ in range(n):
+                    (o, _), r, d, ep_ret, ep_len = test_env.reset(), 0, False, 0, 0
+                    while not (d or (ep_len == max_ep_len)):
+                        # epsilon_eval used when evaluating the agent
+                        o, r, d, truncated, _ = test_env.step(agent.get_action(o))
+                        d = d | truncated # truncated -> done
+                        ep_ret += r
+                        ep_len += 1
+                    logger.store(TestEpRet=ep_ret, TestEpLen=ep_len)
+            
+            test_agent()
+
             if (epoch % save_freq == 0) or (epoch == epochs - 1):
                 logger.save_state({'env': env}, epoch)
                         
             logger.log_tabular('Epoch', epoch)
             logger.log_tabular('EpRet', with_min_and_max=True)
             logger.log_tabular('EpLen', average_only=True)
+            logger.log_tabular('TestEpRet', with_min_and_max=True)
+            logger.log_tabular('TestEpLen', average_only=True)
             logger.log_tabular('TotalEnvInteracts', (epoch+1)*steps_per_epoch)
             logger.log_tabular('QVals', with_min_and_max=True)
             logger.log_tabular('LossPi', average_only=True)
