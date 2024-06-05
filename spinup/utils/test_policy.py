@@ -103,6 +103,8 @@ def load_pytorch_policy(fpath, itr, deterministic=False):
         with torch.no_grad():
             x = torch.as_tensor(x, dtype=torch.float32)
             action = model.act(x)
+            if isinstance(action, torch.Tensor):
+                action = action.numpy()
         return action
 
     return get_action

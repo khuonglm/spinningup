@@ -68,7 +68,7 @@ class Actor(nn.Module):
         return action.detach().cpu()
     
     def act(self, state):
-        return self.get_det_action(state)
+        return self.get_det_action(state).numpy()
 
 
 class Critic(nn.Module):
